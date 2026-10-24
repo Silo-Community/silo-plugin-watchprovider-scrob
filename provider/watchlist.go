@@ -9,11 +9,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Scrob has no single watchlist of its own, only named lists. It mirrors
-// another service's watchlist as a list of its own, such as "MDBList -
-// Watchlist", and the plugin does the same: Silo's watchlist lives in a list
-// named watchlistName, created on the first export. The user's other lists,
-// including ones mirroring other services, are never touched.
+// Newer Scrob has a native watchlist (GET /lists/watchlist) that every
+// service it syncs with shares, so Silo's watchlist lives there and meets the
+// Plex, Trakt, MDBList and Simkl ones in a single list. Older Scrob has only
+// named lists and mirrors each service as a list of its own, so there the
+// plugin keeps Silo's watchlist in a list named watchlistName, created on the
+// first export. Other lists are never touched, except that once the native
+// watchlist exists, the plugin moves its own old list into it.
 const watchlistName = "Silo - Watchlist"
 
 const watchlistDescription = "Silo's watchlist, kept in sync by the Silo Scrob plugin."
@@ -62,9 +64,49 @@ type scrobListItemIn struct {
 	MediaType string `json:"media_type"`
 }
 
-// findWatchlist returns the id of the plugin's list, or zero when there is
-// none yet. Should two lists carry the name, the oldest one is used.
+// nativeWatchlist returns the id of Scrob's native watchlist, which Scrob
+// creates on first use. ok is false on a Scrob without one: there
+// /lists/watchlist falls through to /lists/{list_id} and fails validation.
+func nativeWatchlist(ctx context.Context, client *apiClient) (id int, ok bool, fault *pluginv1.WatchSyncFault) {
+	var list scrobList
+	status, fault := client.request(ctx, http.MethodGet, "/lists/watchlist", nil, nil, &list)
+	switch {
+	case fault == nil && list.ID > 0:
+		return list.ID, true, nil
+	case fault == nil:
+		return 0, false, temporaryFault("Scrob did not return its watchlist")
+	case status == http.StatusUnprocessableEntity || status == http.StatusNotFound:
+		return 0, false, nil
+	default:
+		return 0, false, fault
+	}
+}
+
+// findWatchlist returns the id of the list Silo's watchlist lives in: the
+// native watchlist where Scrob has one, otherwise the plugin's own list, or
+// zero when there is none yet. Should two lists carry the name, the oldest
+// one is used.
 func findWatchlist(ctx context.Context, client *apiClient) (int, *pluginv1.WatchSyncFault) {
+	nativeID, native, fault := nativeWatchlist(ctx, client)
+	if fault != nil {
+		return 0, fault
+	}
+	legacyID, fault := findLegacyWatchlist(ctx, client)
+	if fault != nil {
+		return 0, fault
+	}
+	if !native {
+		return legacyID, nil
+	}
+	if legacyID > 0 {
+		if fault := adoptLegacyWatchlist(ctx, client, legacyID, nativeID); fault != nil && connectionWide(fault) {
+			return 0, fault
+		}
+	}
+	return nativeID, nil
+}
+
+func findLegacyWatchlist(ctx context.Context, client *apiClient) (int, *pluginv1.WatchSyncFault) {
 	var payload scrobListsResponse
 	if fault := client.get(ctx, "/lists", nil, &payload); fault != nil {
 		return 0, fault
@@ -76,6 +118,41 @@ func findWatchlist(ctx context.Context, client *apiClient) (int, *pluginv1.Watch
 		}
 	}
 	return found, nil
+}
+
+// adoptLegacyWatchlist moves the plugin's own list into the native watchlist
+// and deletes it, so Silo's titles aren't kept twice. A title already on the
+// native watchlist is fine. If anything fails, or the list holds something the
+// plugin never puts there (a season, say), the list stays and the move is
+// tried again on the next sync.
+func adoptLegacyWatchlist(ctx context.Context, client *apiClient, legacyID, nativeID int) *pluginv1.WatchSyncFault {
+	items, fault := watchlistItems(ctx, client, legacyID)
+	if fault != nil {
+		return fault
+	}
+	keep := false
+	for _, item := range items {
+		if !watchlistMedia(item.Media) || (item.Media.TMDBID <= 0 && item.Media.TVDBID <= 0) {
+			keep = true
+			continue
+		}
+		body := scrobListItemIn{TMDBID: item.Media.TMDBID, MediaType: item.Media.Type}
+		if item.Media.TMDBID <= 0 {
+			body.TVDBID = item.Media.TVDBID
+		}
+		status, fault := client.postStatus(ctx, "/lists/"+strconv.Itoa(nativeID)+"/items", body, nil)
+		if fault != nil && status != http.StatusConflict {
+			return fault
+		}
+	}
+	if keep {
+		return nil
+	}
+	code, fault := client.delete(ctx, "/lists/"+strconv.Itoa(legacyID), nil)
+	if fault != nil && code != http.StatusNotFound {
+		return fault
+	}
+	return nil
 }
 
 func ensureWatchlist(ctx context.Context, client *apiClient) (int, *pluginv1.WatchSyncFault) {
@@ -101,7 +178,7 @@ func watchlistItems(ctx context.Context, client *apiClient, listID int) ([]scrob
 	return detail.Items, nil
 }
 
-// listWatchlist reports the plugin's list as a complete snapshot. Silo removes
+// listWatchlist reports Silo's watchlist list as a complete snapshot. Silo removes
 // an item from its watchlist only when the list held it before and no longer
 // does, and only with watchlist removals on. Before the first export creates
 // the list there is nothing to report, so the traversal is an empty
