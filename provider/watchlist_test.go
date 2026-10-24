@@ -22,6 +22,9 @@ type fakeLists struct {
 	addStatus int
 	// watched holds Scrob's completed watches by movie TMDB id.
 	watched map[string][]scrobItemEvent
+	// native is the id of Scrob's native watchlist. Zero is a Scrob without
+	// one, where /lists/watchlist fails validation as /lists/{list_id}.
+	native int
 }
 
 func (f *fakeLists) serve(t *testing.T) (*apiClient, func()) {
@@ -42,6 +45,13 @@ func (f *fakeLists) serve(t *testing.T) (*apiClient, func()) {
 			f.writes = append(f.writes, "create "+in.Name)
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(scrobList{ID: f.nextID, Name: in.Name})
+		case r.Method == http.MethodGet && path == "/lists/watchlist":
+			if f.native == 0 {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"detail":[]}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(scrobList{ID: f.native, Name: "Watchlist"})
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "/lists/"):
 			id := atoi(strings.TrimPrefix(path, "/lists/"))
 			_ = json.NewEncoder(w).Encode(scrobListDetail{Items: f.items[id]})
@@ -309,5 +319,124 @@ func TestConnectionSettingDefaultsWhenAbsent(t *testing.T) {
 	auth.ConnectionSettings = map[string]string{settingRemoveWatchedMovies: "false"}
 	if connectionSetting(auth, settingRemoveWatchedMovies, true) {
 		t.Errorf("setting turned off = true, want false")
+	}
+}
+
+// On a Scrob with a native watchlist, Silo's watchlist is that list: it is
+// read as a complete snapshot even before any export, and adds go to it
+// without creating a list of the plugin's own.
+func TestNativeWatchlistIsUsedWhenScrobHasOne(t *testing.T) {
+	f := &fakeLists{
+		native: 3,
+		lists:  []scrobList{{ID: 3, Name: "Watchlist"}, {ID: 7, Name: "MDBList - Watchlist (old)"}},
+		items:  map[int][]scrobListItem{3: {{ID: 30, Media: scrobMedia{Type: "movie", TMDBID: 42}}}},
+	}
+	client, done := f.serve(t)
+	defer done()
+
+	resp, err := NewServer(nil).listWatchlist(context.Background(), client, false)
+	if err != nil || resp.GetFault() != nil {
+		t.Fatalf("listWatchlist() = %v, %v", resp, err)
+	}
+	if !resp.GetCompleteSnapshot() || len(resp.GetItems()) != 1 {
+		t.Errorf("response = %+v, want the native watchlist as a complete snapshot", resp)
+	}
+
+	result := writeOne(t, client, watchlistEvent(opAddToWatchlist, movieType, map[string]string{"tmdb": "550"}), false)
+	if result.GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED {
+		t.Errorf("status = %v, want APPLIED", result.GetStatus())
+	}
+	if len(f.writes) != 1 || f.writes[0] != "add /lists/3/items movie" {
+		t.Errorf("writes = %v, want one add to the native watchlist and no list created", f.writes)
+	}
+}
+
+// The plugin's old list is moved into the native watchlist and deleted.
+func TestNativeWatchlistAdoptsTheOldPluginList(t *testing.T) {
+	f := &fakeLists{
+		native: 3,
+		lists:  []scrobList{{ID: 3, Name: "Watchlist"}, {ID: 9, Name: watchlistName}},
+		items: map[int][]scrobListItem{
+			9: {
+				{ID: 90, Media: scrobMedia{Type: "movie", TMDBID: 42}},
+				{ID: 91, Media: scrobMedia{Type: "series", TVDBID: 121361}},
+			},
+		},
+	}
+	client, done := f.serve(t)
+	defer done()
+
+	id, fault := findWatchlist(context.Background(), client)
+	if fault != nil || id != 3 {
+		t.Fatalf("findWatchlist() = %d, %v; want the native watchlist", id, fault)
+	}
+	want := []string{"add /lists/3/items movie", "add /lists/3/items series", "delete /lists/9"}
+	if strings.Join(f.writes, "; ") != strings.Join(want, "; ") {
+		t.Errorf("writes = %v, want %v", f.writes, want)
+	}
+}
+
+// A title that's already on the native watchlist doesn't stop the move.
+func TestNativeWatchlistAdoptionTreatsAConflictAsMoved(t *testing.T) {
+	f := &fakeLists{
+		native:    3,
+		addStatus: http.StatusConflict,
+		lists:     []scrobList{{ID: 3, Name: "Watchlist"}, {ID: 9, Name: watchlistName}},
+		items:     map[int][]scrobListItem{9: {{ID: 90, Media: scrobMedia{Type: "movie", TMDBID: 42}}}},
+	}
+	client, done := f.serve(t)
+	defer done()
+
+	if _, fault := findWatchlist(context.Background(), client); fault != nil {
+		t.Fatalf("findWatchlist() fault: %v", fault)
+	}
+	if f.writes[len(f.writes)-1] != "delete /lists/9" {
+		t.Errorf("writes = %v, want the old list deleted", f.writes)
+	}
+}
+
+// A failed move, or a list holding something the plugin never adds, keeps
+// the old list so nothing is lost; the move is retried on the next sync.
+func TestNativeWatchlistAdoptionKeepsTheOldListWhenItCannotMoveEverything(t *testing.T) {
+	season := 1
+	cases := map[string]*fakeLists{
+		"failed add": {
+			native: 3, addStatus: http.StatusInternalServerError,
+			lists: []scrobList{{ID: 3, Name: "Watchlist"}, {ID: 9, Name: watchlistName}},
+			items: map[int][]scrobListItem{9: {{ID: 90, Media: scrobMedia{Type: "movie", TMDBID: 42}}}},
+		},
+		"season on the list": {
+			native: 3,
+			lists:  []scrobList{{ID: 3, Name: "Watchlist"}, {ID: 9, Name: watchlistName}},
+			items:  map[int][]scrobListItem{9: {{ID: 90, Media: scrobMedia{Type: "series", TMDBID: 1399, SeasonNumber: &season}}}},
+		},
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			client, done := f.serve(t)
+			defer done()
+
+			id, fault := findWatchlist(context.Background(), client)
+			if fault != nil || id != 3 {
+				t.Fatalf("findWatchlist() = %d, %v; want the native watchlist", id, fault)
+			}
+			for _, write := range f.writes {
+				if write == "delete /lists/9" {
+					t.Errorf("writes = %v, want the old list kept", f.writes)
+				}
+			}
+		})
+	}
+}
+
+// A Scrob without a native watchlist keeps the plugin's own list.
+func TestOlderScrobKeepsThePluginList(t *testing.T) {
+	f := &fakeLists{lists: []scrobList{{ID: 9, Name: watchlistName}}}
+	client, done := f.serve(t)
+	defer done()
+
+	id, fault := findWatchlist(context.Background(), client)
+	if fault != nil || id != 9 || len(f.writes) != 0 {
+		t.Errorf("findWatchlist() = %d, %v, writes %v; want the plugin's list untouched", id, fault, f.writes)
 	}
 }
