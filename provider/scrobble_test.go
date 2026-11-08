@@ -274,6 +274,37 @@ func TestScrobbleStopRecordsAFinishedPlayAtSilosTime(t *testing.T) {
 	}
 }
 
+// A finished play Scrob fails to write still leaves Now Playing, which Scrob
+// never clears on its own; the failure reaches Silo, whose watched sync
+// retries the play.
+func TestScrobbleStopDismissesWhenThePlayIsNotWritten(t *testing.T) {
+	calls := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/proxy/history":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/proxy/history/now-playing":
+			_, _ = w.Write([]byte(`{"now_playing":[{"session_key":"kodi:3:sess-7"}]}`))
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, "key", server.Client())
+	if err != nil {
+		t.Fatalf("newAPIClient() error: %v", err)
+	}
+
+	r := scrobbleOne(t, client, stopEvent(true, 95), scrobbleStop)
+	if got := calls[len(calls)-1]; got != dismissKodi {
+		t.Errorf("calls = %v, want the session dismissed last", calls)
+	}
+	if r.GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_RETRY {
+		t.Errorf("status = %v, want RETRY", r.GetStatus())
+	}
+}
+
 // A stop Scrob would count as a play but Silo did not is dismissed, so Scrob
 // holds no play Silo lacks.
 func TestScrobbleStopDismissesAPlaySiloDidNotCount(t *testing.T) {

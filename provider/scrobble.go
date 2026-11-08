@@ -229,8 +229,10 @@ func recordFinishedPlayback(ctx context.Context, client *apiClient, event *plugi
 		case connectionWide(fault):
 			return fault
 		default:
+			// The playback is over either way, and Scrob drops a Now Playing
+			// session only when told to. Silo's watched sync retries the play.
 			results.fail(event, fault)
-			return nil
+			return dismissSessionQuietly(ctx, client, event)
 		}
 	}
 	if fault := dismissSession(ctx, client, event); fault != nil {
