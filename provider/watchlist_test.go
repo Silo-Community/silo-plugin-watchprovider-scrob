@@ -20,6 +20,8 @@ type fakeLists struct {
 	nextID int
 	// addStatus, when set, answers every item add.
 	addStatus int
+	// deleteStatus, when set, answers every delete.
+	deleteStatus int
 	// watched holds Scrob's completed watches by movie TMDB id.
 	watched map[string][]scrobItemEvent
 	// native is the id of Scrob's native watchlist. Zero is a Scrob without
@@ -67,6 +69,10 @@ func (f *fakeLists) serve(t *testing.T) (*apiClient, func()) {
 			_, _ = w.Write([]byte(`{}`))
 		case r.Method == http.MethodDelete:
 			f.writes = append(f.writes, "delete "+path)
+			if f.deleteStatus != 0 {
+				w.WriteHeader(f.deleteStatus)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, path)
@@ -184,7 +190,11 @@ func TestWriteWatchlistCreatesTheListOnTheFirstAdd(t *testing.T) {
 
 // Scrob answers 409 for an item already on the list.
 func TestWriteWatchlistTreatsAnItemAlreadyListedAsNoChange(t *testing.T) {
-	f := &fakeLists{lists: []scrobList{{ID: 9, Name: watchlistName}}, addStatus: http.StatusConflict}
+	f := &fakeLists{
+		lists:     []scrobList{{ID: 9, Name: watchlistName}},
+		items:     map[int][]scrobListItem{9: {{ID: 90, Media: scrobMedia{Type: "series", TVDBID: 121361}}}},
+		addStatus: http.StatusConflict,
+	}
 	client, done := f.serve(t)
 	defer done()
 
