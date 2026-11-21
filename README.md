@@ -17,13 +17,17 @@ Connects Silo profiles to a self-hosted [Scrob](https://github.com/ellite/scrob)
 
 On Scrob 2.38.0 or later, which has a native watchlist ([ellite/scrob#512](https://github.com/ellite/scrob/pull/512)), Silo's watchlist syncs with it. That is the same list Scrob syncs with Plex, Trakt, MDBList and Simkl, so a title added on any of them reaches Silo, and one added in Silo reaches them, through Scrob. If an older version of the plugin left a **Silo - Watchlist** list behind, the plugin moves its titles to the native watchlist and deletes the old list. Something the plugin never adds there, such as a season, stays on the old list, and so does the list. If the move fails, the sync fails and the next one finishes the move.
 
-On an older Scrob, which has only named lists, Silo's watchlist lives in a Scrob list named **Silo - Watchlist**, which the first export creates. The plugin never touches your other lists, including ones that mirror other services, so a title can sit on several of them.
+On an older Scrob, which has only named lists, Silo's watchlist lives in a Scrob list named **Silo - Watchlist**, which the first export creates.
 
 Silo's own connection switches control it: import watchlist, export watchlist, and watchlist removals. Silo turns import and export on when a profile connects and leaves removals off, so nothing leaves either watchlist until you enable removals. One switch is the plugin's own: **Remove watched movies from the Scrob watchlist**, on by default. Silo takes a watched movie off its own watchlist by default, but only sends that removal to Scrob with watchlist removals on. Without the switch the movie would stay on the Scrob list, and the next import would put it back on Silo's watchlist. With it, each sync takes a movie off the list once Scrob records a watch made after the movie was listed. On the native watchlist, Scrob then also removes it from the services it pushes the watchlist to. A movie you list again after watching it, to rewatch it, stays. Series stay listed, because new episodes can arrive.
 
 The list holds movies and whole series. Seasons, episodes and people you put on it in Scrob are not imported.
 
 The plugin does not sync favorites. Scrob has no favorites list.
+
+## Lists
+
+On a Silo build with list sync (the `sync_collections` capability), your other Scrob lists sync both ways with collections on the Silo profile; Silo's **Sync lists** connection switch turns it on. Each Scrob list gets a hand-picked collection named after it, and titles added to or removed from either side follow. Only whole movies and series sync; seasons and people on a list stay in Scrob. The watchlist and the old **Silo - Watchlist** list are not part of it. A list deleted in Scrob leaves its Silo collection in place, unlinked. A collection made in Silo stays in Silo, because the plugin does not create Scrob lists. Lists Scrob syncs with MDBList or Trakt carry Silo's changes on to them.
 
 ## Live playback
 

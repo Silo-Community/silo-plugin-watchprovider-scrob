@@ -106,6 +106,8 @@ func (s *Server) ListRemoteState(ctx context.Context, req *pluginv1.WatchSyncLis
 		return s.listDropped(ctx, client)
 	case pluginv1.WatchSyncRemoteStateKind_WATCH_SYNC_REMOTE_STATE_KIND_WATCHLIST:
 		return s.listWatchlist(ctx, client, connectionSetting(req.GetContext(), settingRemoveWatchedMovies, true))
+	case pluginv1.WatchSyncRemoteStateKind_WATCH_SYNC_REMOTE_STATE_KIND_COLLECTION:
+		return s.listCollections(ctx, client)
 	default:
 		return &pluginv1.WatchSyncListRemoteStateResponse{
 			Fault: invalidRequestFault("Scrob does not support the requested state family"),
@@ -193,6 +195,10 @@ func applyGroup(ctx context.Context, client *apiClient, events []*pluginv1.Watch
 		return writeWatchlist(ctx, client, pending, results, false)
 	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_REMOVE_FROM_WATCHLIST:
 		return writeWatchlist(ctx, client, pending, results, true)
+	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_ADD_TO_COLLECTION:
+		return writeCollection(ctx, client, pending, results, false)
+	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_REMOVE_FROM_COLLECTION:
+		return writeCollection(ctx, client, pending, results, true)
 	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_MARK_DROPPED:
 		return writeDropped(ctx, client, pending, results, false)
 	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_UNMARK_DROPPED:
